@@ -1,0 +1,112 @@
+name: Sync and Merge Upstream
+on:
+  schedule:
+    - cron: '0 * * * *'  # Run hourly
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Add explicit permission to write to the repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: rawhide
+          token: ${{ secrets.WORKFLOW_TOKEN }}  # Use the GitHub token for checkout
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git remote set-url origin https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+      - name: Add Upstream Remote and Fetch
+        run: |
+          git remote add upstream https://src.fedoraproject.org/rpms/mutter.git
+          git fetch upstream
+
+      - name: Check for upstream changes
+        id: check_changes
+        run: |
+          UPSTREAM_SHA=$(git rev-parse upstream/rawhide)
+          BASE_SHA=$(git rev-parse HEAD)
+          echo "upstream_sha=${UPSTREAM_SHA}" >> $GITHUB_OUTPUT
+          echo "base_sha=${BASE_SHA}" >> $GITHUB_OUTPUT
+          
+          # Get the commit we're based on by looking at the first parent
+          BASE_UPSTREAM_SHA=$(git rev-list --parents -n 1 HEAD | cut -d' ' -f2)
+          
+          if [ "$BASE_UPSTREAM_SHA" = "$UPSTREAM_SHA" ]; then
+            echo "No new upstream changes detected"
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+          else
+            echo "New upstream changes detected"
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Reset to Upstream and Apply Custom Changes
+        if: steps.check_changes.outputs.needs_update == 'true'
+        run: |
+          # Store our files to reapply later
+          cp .github/workflows/main.yml /tmp/main.yml
+          if [ -f 0001-onscreen-native-prefer-gbm-surface-create-with-modifiers-even-for-linear.patch ]; then
+            cp 0001-onscreen-native-prefer-gbm-surface-create-with-modifiers-even-for-linear.patch /tmp/
+          fi
+
+          # Reset to upstream's rawhide branch
+          git reset --hard upstream/rawhide
+          
+          # Apply our customizations
+          
+          # 1. Add sources to .gitignore if not already there
+          if ! grep -q '^sources$' .gitignore; then
+            echo 'sources' >> .gitignore
+            echo "Added 'sources' to .gitignore"
+          fi
+          
+          # 2. Remove sources file if it exists
+          if [ -f sources ]; then
+            rm sources
+            git rm --cached sources
+            echo "Removed sources file"
+          fi
+          
+          # 3. Convert HTTP to HTTPS in mutter.spec
+          sed -i 's|http://download.gnome.org|https://download.gnome.org|g' mutter.spec
+          echo "Converted HTTP to HTTPS in mutter.spec"
+          
+          # 4. Add patch reference to mutter.spec after the last Patch: entry
+          LAST_PATCH_LINE=$(grep -n "^Patch:" mutter.spec | tail -n1 | cut -d: -f1)
+          sed -i "${LAST_PATCH_LINE}a\\\n# https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/4284\nPatch:         0001-onscreen-native-prefer-gbm-surface-create-with-modifiers-even-for-linear.patch" mutter.spec
+          echo "Added patch reference to mutter.spec"
+          
+          # 5. Restore our GitHub Actions workflow
+          mkdir -p .github/workflows
+          cp /tmp/main.yml .github/workflows/main.yml
+          echo "Restored GitHub Actions workflow file"
+          
+          # 6. Restore patch file if it existed
+          if [ -f /tmp/0001-onscreen-native-prefer-gbm-surface-create-with-modifiers-even-for-linear.patch ]; then
+            cp /tmp/0001-onscreen-native-prefer-gbm-surface-create-with-modifiers-even-for-linear.patch ./
+            echo "Restored patch file"
+          fi
+          
+          # Commit our changes on top of upstream
+          git add .gitignore mutter.spec .github/workflows/main.yml
+          if [ -f 0001-onscreen-native-prefer-gbm-surface-create-with-modifiers-even-for-linear.patch ]; then
+            git add 0001-onscreen-native-prefer-gbm-surface-create-with-modifiers-even-for-linear.patch
+          fi
+          git status
+          
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Apply customizations on top of upstream rawhide"
+            
+            # Force push to our rawhide branch
+            git push --force origin rawhide
+            echo "Successfully pushed changes"
+          fi

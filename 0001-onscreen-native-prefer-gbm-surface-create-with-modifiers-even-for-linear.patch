@@ -1,0 +1,54 @@
+From 4d3aafd408cccc60bd4fd10f1e034c00bc9b4d63 Mon Sep 17 00:00:00 2001
+From: Daniel van Vugt <daniel.van.vugt@canonical.com>
+Date: Tue, 18 Feb 2025 16:11:58 +0800
+Subject: [PATCH] onscreen/native: Prefer gbm_surface_create_with_modifiers
+ even for linear
+
+The Nvidia driver doesn't implement `gbm_surface_create` properly,
+which was first mentioned in 9fee3a9ec1. So using `gbm_surface_create`
+as a fallback for the linear case was failing with ENOSYS (Function not
+implemented).
+
+Closes: https://gitlab.gnome.org/GNOME/mutter/-/issues/3918
+
+Fixes: 163520c177 ("onscreen/native: Do not use modifiers if surface should be sharable")
+
+See also: https://forums.developer.nvidia.com/t/gbm-surface-create-fails-if-flags-0/279951
+---
+ src/backends/native/meta-onscreen-native.c | 20 ++++++++++++++++----
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+diff --git a/src/backends/native/meta-onscreen-native.c b/src/backends/native/meta-onscreen-native.c
+index 6cd6bd36e1..c685b98614 100644
+--- a/src/backends/native/meta-onscreen-native.c
++++ b/src/backends/native/meta-onscreen-native.c
+@@ -2402,11 +2402,23 @@ create_surfaces_gbm (CoglOnscreen        *onscreen,
+                                     cogl_renderer_egl->edpy,
+                                     egl_config);
+ 
+-  if (!should_be_sharable &&
+-      meta_renderer_native_use_modifiers (renderer_native))
+-    modifiers = get_supported_modifiers (onscreen, format);
++  if (meta_renderer_native_use_modifiers (renderer_native))
++    {
++      if (should_be_sharable)
++        {
++          modifiers = g_array_sized_new (FALSE, FALSE, sizeof (uint64_t), 1);
++          g_array_set_size (modifiers, 1);
++          ((uint64_t *) modifiers->data)[0] = DRM_FORMAT_MOD_LINEAR;
++        }
++      else
++        {
++          modifiers = get_supported_modifiers (onscreen, format);
++        }
++    }
+   else
+-    modifiers = NULL;
++    {
++      modifiers = NULL;
++    }
+ 
+   if (modifiers)
+     {
+-- 
+GitLab
